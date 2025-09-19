@@ -370,7 +370,7 @@ app.post('/webhook', (req, res) => {
     .all(req.body.events.map(handleEvent))
     .then((result) => res.json(result))
     .catch((err) => {
-      console.error(err);
+      console.error('Webhook處理錯誤:', err);
       res.status(500).end();
     });
 });
@@ -395,5 +395,18 @@ app.listen(port, () => {
   console.log(`🚀 葛董發言記錄系統運行在 port ${port}`);
   console.log(`📱 準備接收 LINE 訊息並記錄董事長發言！`);
   console.log(`👑 支援董事長和代理人發言識別`);
+});
+
+// 優雅關閉處理
+process.on('SIGTERM', () => {
+  console.log('收到 SIGTERM 信號，正在關閉服務器...');
+  db.close((err) => {
+    if (err) {
+      console.error('關閉資料庫時發生錯誤:', err);
+    } else {
+      console.log('資料庫連接已關閉');
+    }
+    process.exit(0);
+  });
 });
 ```
