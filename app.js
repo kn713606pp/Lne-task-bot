@@ -1,4 +1,3 @@
-```javascript
 require('dotenv').config();
 const express = require('express');
 const { Client, middleware } = require('@line/bot-sdk');
@@ -27,12 +26,12 @@ db.serialize(() => {
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     group_id TEXT NOT NULL,
     speaker_name TEXT NOT NULL,
-    speaker_type TEXT NOT NULL, -- 'chairman' 或 'delegate'
-    speaker_role TEXT NOT NULL, -- '董事長' 或 '代理人'
+    speaker_type TEXT NOT NULL,
+    speaker_role TEXT NOT NULL,
     message_content TEXT NOT NULL,
-    record_type TEXT NOT NULL, -- 'speech' 或 'task'
-    task_description TEXT NULL, -- 如果是任務，AI解析的任務描述
-    priority TEXT NULL, -- 任務優先級
+    record_type TEXT NOT NULL,
+    task_description TEXT NULL,
+    priority TEXT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     processed_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
@@ -129,7 +128,7 @@ async function analyzeMessage(message, speakerType, speakerName) {
     });
 
     const result = response.choices[0].message.content.trim();
-  
+    
     if (result === '發言') {
       return {
         type: 'speech',
@@ -137,26 +136,26 @@ async function analyzeMessage(message, speakerType, speakerName) {
         priority: null
       };
     }
-  
+    
     const parts = result.split('|');
     if (parts[0] === '任務' && parts.length >= 3) {
       const priority = parts[2]?.includes('高') ? 'high' : 
                       parts[2]?.includes('低') ? 'low' : 'normal';
-    
+      
       return {
         type: 'task',
         taskDescription: parts[1] || message,
         priority: priority
       };
     }
-  
+    
     // 如果AI回覆格式不正確，預設為一般發言
     return {
       type: 'speech',
       taskDescription: null,
       priority: null
     };
-  
+    
   } catch (error) {
     console.error('AI分析錯誤:', error);
     // AI失敗時，預設為一般發言
@@ -173,7 +172,7 @@ function recordMessage(groupId, speakerName, messageContent, analysisResult, spe
   return new Promise((resolve, reject) => {
     const { type, taskDescription, priority } = analysisResult;
     const { type: speakerType, role: speakerRole } = speakerInfo;
-  
+    
     db.run(`INSERT INTO chairman_records 
             (group_id, speaker_name, speaker_type, speaker_role, message_content, record_type, task_description, priority) 
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, 
@@ -195,23 +194,23 @@ function getRecords(groupId, type = 'all', speakerFilter = 'all') {
   return new Promise((resolve, reject) => {
     let query = 'SELECT * FROM chairman_records WHERE group_id = ?';
     const params = [groupId];
-  
+    
     // 記錄類型過濾
     if (type === 'speech') {
       query += ' AND record_type = "speech"';
     } else if (type === 'task') {
       query += ' AND record_type = "task"';
     }
-  
+    
     // 發言者類型過濾
     if (speakerFilter === 'chairman') {
       query += ' AND speaker_type = "chairman"';
     } else if (speakerFilter === 'delegate') {
       query += ' AND speaker_type = "delegate"';
     }
-  
+    
     query += ' ORDER BY created_at DESC';
-  
+    
     db.all(query, params, (err, rows) => {
       if (err) {
         console.error('查詢記錄錯誤:', err);
@@ -238,16 +237,16 @@ function formatRecords(records) {
       hour: '2-digit',
       minute: '2-digit'
     });
-  
+    
     const typeIcon = record.record_type === 'task' ? '📌' : '💬';
     const speakerIcon = record.speaker_type === 'chairman' ? '👑' : '👤';
     const priorityIcon = record.priority === 'high' ? '🔴' : 
                         record.priority === 'low' ? '🟢' : 
                         record.priority === 'normal' ? '🟡' : '';
-  
+    
     response += `${index + 1}. ${typeIcon} ${speakerIcon} ${date}\n`;
     response += `   👤 ${record.speaker_role}：${record.speaker_name}\n`;
-  
+    
     if (record.record_type === 'task') {
       response += `   🎯 任務：${record.task_description}\n`;
       response += `   ${priorityIcon} 優先級：${record.priority === 'high' ? '高' : record.priority === 'low' ? '低' : '中'}\n`;
@@ -296,7 +295,7 @@ async function handleEvent(event) {
         text: formatRecords(records)
       });
     }
-  
+    
     // 🔍 檢查是否為任務記錄查詢
     if (message === '任務記錄' || message === '任務列表') {
       const records = await getRecords(groupId, 'task');
@@ -305,7 +304,7 @@ async function handleEvent(event) {
         text: formatRecords(records)
       });
     }
-  
+    
     // 🔍 檢查是否為發言記錄查詢
     if (message === '發言記錄') {
       const records = await getRecords(groupId, 'speech');
@@ -314,7 +313,7 @@ async function handleEvent(event) {
         text: formatRecords(records)
       });
     }
-  
+    
     // 🔍 檢查是否為董事長記錄查詢
     if (message === '葛董記錄' || message === '董事長記錄') {
       const records = await getRecords(groupId, 'all', 'chairman');
@@ -323,7 +322,7 @@ async function handleEvent(event) {
         text: formatRecords(records)
       });
     }
-  
+    
     // 🔍 檢查是否為代理人記錄查詢
     if (message === '代理人記錄' || message === '總經理記錄' || message === '特助記錄') {
       const records = await getRecords(groupId, 'all', 'delegate');
@@ -336,23 +335,23 @@ async function handleEvent(event) {
     // 🎯 核心邏輯：獲取發言者資訊
     const profile = await client.getProfile(userId);
     const speakerName = profile.displayName;
-  
+    
     // 🎯 判斷是否為董事長或代理人發言
     const speakerInfo = isChairmanOrDelegate(speakerName);
-  
+    
     if (speakerInfo.isRelevant) {
       console.log(`🎤 偵測到${speakerInfo.role}發言: ${speakerName} - ${message.substring(0, 30)}...`);
-    
+      
       // 🤖 AI 分析發言內容
       const analysisResult = await analyzeMessage(message, speakerInfo.type, speakerName);
-    
+      
       // 📝 記錄到資料庫
       await recordMessage(groupId, speakerName, message, analysisResult, speakerInfo);
-    
+      
       // 🤐 保持靜默，不回應（除非是任務且需要確認）
       // 可以選擇完全靜默，或是私訊通知管理者
     }
-  
+    
     // 🤐 對於其他人的發言，完全忽略，保持靜默
     return Promise.resolve(null);
 
@@ -409,4 +408,3 @@ process.on('SIGTERM', () => {
     process.exit(0);
   });
 });
-```
