@@ -1,3 +1,4 @@
+```javascript
 require('dotenv').config();
 const express = require('express');
 const { Client, middleware } = require('@line/bot-sdk');
@@ -19,203 +20,346 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// 資料庫初始化
-const db = new sqlite3.Database('./tasks.db');
+// 資料庫初始化 - 董事長及代理人發言記錄表
+const db = new sqlite3.Database('./chairman_records.db');
 db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS tasks (
+  db.run(`CREATE TABLE IF NOT EXISTS chairman_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT NOT NULL,
-    task_content TEXT NOT NULL,
-    status TEXT DEFAULT 'pending',
+    group_id TEXT NOT NULL,
+    speaker_name TEXT NOT NULL,
+    speaker_type TEXT NOT NULL, -- 'chairman' 或 'delegate'
+    speaker_role TEXT NOT NULL, -- '董事長' 或 '代理人'
+    message_content TEXT NOT NULL,
+    record_type TEXT NOT NULL, -- 'speech' 或 'task'
+    task_description TEXT NULL, -- 如果是任務，AI解析的任務描述
+    priority TEXT NULL, -- 任務優先級
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    completed_at DATETIME NULL
+    processed_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
+  
+  // 創建索引以提高查詢效能
+  db.run(`CREATE INDEX IF NOT EXISTS idx_group_id ON chairman_records(group_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_speaker_type ON chairman_records(speaker_type)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_record_type ON chairman_records(record_type)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_created_at ON chairman_records(created_at)`);
 });
 
-// AI 任務分析功能
-async function analyzeTask(message) {
+// 🎯 核心功能：識別是否為葛董或其代理人
+function isChairmanOrDelegate(displayName) {
+  const chairmanNames = [
+    '葛望平',
+    '葛董',
+    '董事長',
+    'Ge Wang Ping',
+    'GE WANG PING'
+  ];
+  
+  const delegateNames = [
+    '蔡怡穎',
+    '總經理',
+    '林秀玲',
+    '特助',
+    'Cai Yi Ying',
+    'Lin Xiu Ling'
+  ];
+  
+  const isChairman = chairmanNames.some(name => 
+    displayName.includes(name) || 
+    displayName.toLowerCase().includes(name.toLowerCase())
+  );
+  
+  const isDelegate = delegateNames.some(name => 
+    displayName.includes(name) || 
+    displayName.toLowerCase().includes(name.toLowerCase())
+  );
+  
+  return {
+    isRelevant: isChairman || isDelegate,
+    type: isChairman ? 'chairman' : (isDelegate ? 'delegate' : 'other'),
+    role: isChairman ? '董事長' : (isDelegate ? '代理人' : '其他')
+  };
+}
+
+// 🤖 AI 分析發言是否包含任務交辦（支援董事長和代理人）
+async function analyzeMessage(message, speakerType, speakerName) {
   try {
+    const systemPrompt = speakerType === 'chairman' 
+      ? `你是董事長發言分析助手。分析董事長的發言是否包含任務交辦或重要指示。`
+      : `你是代理人發言分析助手。分析代理人（總經理/特助）是否代表董事長交辦任務或傳達重要指示。
+
+特別注意代理人常用的措辭：
+- "葛董說..."、"董事長指示..."、"葛董要求..."
+- "董事長交代..."、"葛董的意見是..."
+- 即使沒有明確提及董事長，但涉及重要決策或指示的內容`;
+
     const response = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
       messages: [
         {
           role: "system",
-          content: "你是任務分析助手。從用戶訊息中提取任務內容。如果訊息包含任務，請簡潔地描述任務。如果不是任務，回覆'非任務訊息'。"
+          content: `${systemPrompt}
+
+判斷標準：
+- 包含明確的行動要求（如：去做、處理、安排、準備等）
+- 涉及時間要求（如：今天、明天、本週等）
+- 針對特定人員或部門的指派
+- 重要決策或指示
+- 代理人傳達董事長意見或指示
+
+如果包含任務，回覆格式：'任務|任務描述|優先級'（優先級：高/中/低）
+如果只是一般發言，回覆：'發言'
+
+範例：
+輸入：「葛董說明天董事會要準備Q3財報」
+輸出：「任務|準備Q3財報供董事會使用|高」
+
+輸入：「董事長交代要加快專案進度」
+輸出：「任務|加快專案進度|高」
+
+輸入：「今天天氣不錯」  
+輸出：「發言」`
         },
         {
           role: "user",
-          content: message
+          content: `${speakerType === 'chairman' ? '董事長' : '代理人'}發言：${message}`
         }
       ],
-      max_tokens: 100,
+      max_tokens: 150,
       temperature: 0.3
     });
 
-    return response.choices[0].message.content.trim();
+    const result = response.choices[0].message.content.trim();
+  
+    if (result === '發言') {
+      return {
+        type: 'speech',
+        taskDescription: null,
+        priority: null
+      };
+    }
+  
+    const parts = result.split('|');
+    if (parts[0] === '任務' && parts.length >= 3) {
+      const priority = parts[2]?.includes('高') ? 'high' : 
+                      parts[2]?.includes('低') ? 'low' : 'normal';
+    
+      return {
+        type: 'task',
+        taskDescription: parts[1] || message,
+        priority: priority
+      };
+    }
+  
+    // 如果AI回覆格式不正確，預設為一般發言
+    return {
+      type: 'speech',
+      taskDescription: null,
+      priority: null
+    };
+  
   } catch (error) {
     console.error('AI分析錯誤:', error);
-    return message; // 如果AI分析失敗，直接返回原始訊息
+    // AI失敗時，預設為一般發言
+    return {
+      type: 'speech',
+      taskDescription: null,
+      priority: null
+    };
   }
 }
 
-// 任務管理功能
-function addTask(userId, taskContent) {
+// 📝 記錄董事長或代理人發言
+function recordMessage(groupId, speakerName, messageContent, analysisResult, speakerInfo) {
   return new Promise((resolve, reject) => {
-    db.run('INSERT INTO tasks (user_id, task_content) VALUES (?, ?)', 
-      [userId, taskContent], 
+    const { type, taskDescription, priority } = analysisResult;
+    const { type: speakerType, role: speakerRole } = speakerInfo;
+  
+    db.run(`INSERT INTO chairman_records 
+            (group_id, speaker_name, speaker_type, speaker_role, message_content, record_type, task_description, priority) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, 
+      [groupId, speakerName, speakerType, speakerRole, messageContent, type, taskDescription, priority], 
       function(err) {
-        if (err) reject(err);
-        else resolve(this.lastID);
+        if (err) {
+          console.error('記錄儲存錯誤:', err);
+          reject(err);
+        } else {
+          console.log(`✅ 已記錄${speakerRole}${type === 'task' ? '任務交辦' : '發言'}:`, messageContent.substring(0, 50) + '...');
+          resolve(this.lastID);
+        }
       });
   });
 }
 
-function getTasks(userId) {
+// 📋 獲取董事長及代理人記錄列表
+function getRecords(groupId, type = 'all', speakerFilter = 'all') {
   return new Promise((resolve, reject) => {
-    db.all('SELECT * FROM tasks WHERE user_id = ? ORDER BY created_at DESC', 
-      [userId], 
-      (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows);
-      });
+    let query = 'SELECT * FROM chairman_records WHERE group_id = ?';
+    const params = [groupId];
+  
+    // 記錄類型過濾
+    if (type === 'speech') {
+      query += ' AND record_type = "speech"';
+    } else if (type === 'task') {
+      query += ' AND record_type = "task"';
+    }
+  
+    // 發言者類型過濾
+    if (speakerFilter === 'chairman') {
+      query += ' AND speaker_type = "chairman"';
+    } else if (speakerFilter === 'delegate') {
+      query += ' AND speaker_type = "delegate"';
+    }
+  
+    query += ' ORDER BY created_at DESC';
+  
+    db.all(query, params, (err, rows) => {
+      if (err) {
+        console.error('查詢記錄錯誤:', err);
+        reject(err);
+      } else {
+        resolve(rows);
+      }
+    });
   });
 }
 
-function completeTask(userId, taskId) {
-  return new Promise((resolve, reject) => {
-    db.run('UPDATE tasks SET status = "completed", completed_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?',
-      [taskId, userId],
-      function(err) {
-        if (err) reject(err);
-        else resolve(this.changes > 0);
-      });
+// 📊 格式化記錄顯示
+function formatRecords(records) {
+  if (records.length === 0) {
+    return '📋 目前沒有相關的發言記錄';
+  }
+
+  let response = `📋 發言記錄（共 ${records.length} 筆）：\n\n`;
+  
+  records.forEach((record, index) => {
+    const date = new Date(record.created_at).toLocaleString('zh-TW', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  
+    const typeIcon = record.record_type === 'task' ? '📌' : '💬';
+    const speakerIcon = record.speaker_type === 'chairman' ? '👑' : '👤';
+    const priorityIcon = record.priority === 'high' ? '🔴' : 
+                        record.priority === 'low' ? '🟢' : 
+                        record.priority === 'normal' ? '🟡' : '';
+  
+    response += `${index + 1}. ${typeIcon} ${speakerIcon} ${date}\n`;
+    response += `   👤 ${record.speaker_role}：${record.speaker_name}\n`;
+  
+    if (record.record_type === 'task') {
+      response += `   🎯 任務：${record.task_description}\n`;
+      response += `   ${priorityIcon} 優先級：${record.priority === 'high' ? '高' : record.priority === 'low' ? '低' : '中'}\n`;
+      response += `   💭 原文：${record.message_content}\n\n`;
+    } else {
+      response += `   💭 發言：${record.message_content}\n\n`;
+    }
   });
+  
+  // 統計資訊
+  const speechCount = records.filter(r => r.record_type === 'speech').length;
+  const taskCount = records.filter(r => r.record_type === 'task').length;
+  const chairmanCount = records.filter(r => r.speaker_type === 'chairman').length;
+  const delegateCount = records.filter(r => r.speaker_type === 'delegate').length;
+  
+  response += `📊 統計：\n`;
+  response += `💬 一般發言 ${speechCount} 筆，📌 任務交辦 ${taskCount} 筆\n`;
+  response += `👑 董事長 ${chairmanCount} 筆，👤 代理人 ${delegateCount} 筆`;
+  
+  return response;
 }
 
-function deleteTask(userId, taskId) {
-  return new Promise((resolve, reject) => {
-    db.run('DELETE FROM tasks WHERE id = ? AND user_id = ?',
-      [taskId, userId],
-      function(err) {
-        if (err) reject(err);
-        else resolve(this.changes > 0);
-      });
-  });
-}
-
-// 訊息處理
+// 🎯 核心：訊息處理邏輯
 async function handleEvent(event) {
+  // 只處理文字訊息
   if (event.type !== 'message' || event.message.type !== 'text') {
     return Promise.resolve(null);
   }
 
+  const message = event.message.text.trim();
   const userId = event.source.userId;
-  const message = event.message.text;
+  
+  // 只處理群組訊息
+  if (event.source.type !== 'group') {
+    return Promise.resolve(null);
+  }
+  
+  const groupId = event.source.groupId;
 
   try {
-    // 指令處理
-    if (message === '查看任務' || message === '任務列表') {
-      const tasks = await getTasks(userId);
-      if (tasks.length === 0) {
-        return client.replyMessage(event.replyToken, {
-          type: 'text',
-          text: '目前沒有任何任務 📝\n\n直接傳送訊息給我，我會幫您建立任務！'
-        });
-      }
-
-      let response = '📋 您的任務列表：\n\n';
-      tasks.forEach((task, index) => {
-        const status = task.status === 'completed' ? '✅' : '⏳';
-        const date = new Date(task.created_at).toLocaleDateString();
-        response += `${index + 1}. ${status} ${task.task_content}\n   (${date})\n\n`;
-      });
-      response += '💡 使用方式：\n• 完成 [編號] - 標記完成\n• 刪除 [編號] - 刪除任務\n• 統計 - 查看統計資料';
-
+    // 🔍 檢查是否為查詢指令
+    if (message === '記錄列表' || message === '全部記錄') {
+      const records = await getRecords(groupId);
       return client.replyMessage(event.replyToken, {
         type: 'text',
-        text: response
+        text: formatRecords(records)
+      });
+    }
+  
+    // 🔍 檢查是否為任務記錄查詢
+    if (message === '任務記錄' || message === '任務列表') {
+      const records = await getRecords(groupId, 'task');
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: formatRecords(records)
+      });
+    }
+  
+    // 🔍 檢查是否為發言記錄查詢
+    if (message === '發言記錄') {
+      const records = await getRecords(groupId, 'speech');
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: formatRecords(records)
+      });
+    }
+  
+    // 🔍 檢查是否為董事長記錄查詢
+    if (message === '葛董記錄' || message === '董事長記錄') {
+      const records = await getRecords(groupId, 'all', 'chairman');
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: formatRecords(records)
+      });
+    }
+  
+    // 🔍 檢查是否為代理人記錄查詢
+    if (message === '代理人記錄' || message === '總經理記錄' || message === '特助記錄') {
+      const records = await getRecords(groupId, 'all', 'delegate');
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: formatRecords(records)
       });
     }
 
-    if (message === '統計') {
-      const tasks = await getTasks(userId);
-      const completed = tasks.filter(t => t.status === 'completed').length;
-      const pending = tasks.filter(t => t.status === 'pending').length;
-      
-      return client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: `📊 任務統計：\n\n✅ 已完成：${completed} 個\n⏳ 進行中：${pending} 個\n📝 總計：${tasks.length} 個\n\n完成率：${tasks.length > 0 ? Math.round((completed / tasks.length) * 100) : 0}%`
-      });
-    }
-
-    if (message.startsWith('完成 ')) {
-      const taskNumber = parseInt(message.replace('完成 ', ''));
-      const tasks = await getTasks(userId);
-      
-      if (taskNumber > 0 && taskNumber <= tasks.length) {
-        const task = tasks[taskNumber - 1];
-        const success = await completeTask(userId, task.id);
-        
-        if (success) {
-          return client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: `✅ 任務已完成！\n\n"${task.task_content}"\n\n恭喜您又完成了一項任務！ 🎉`
-          });
-        }
-      }
-      
-      return client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: '❌ 找不到該任務編號，請使用「查看任務」確認編號'
-      });
-    }
-
-    if (message.startsWith('刪除 ')) {
-      const taskNumber = parseInt(message.replace('刪除 ', ''));
-      const tasks = await getTasks(userId);
-      
-      if (taskNumber > 0 && taskNumber <= tasks.length) {
-        const task = tasks[taskNumber - 1];
-        const success = await deleteTask(userId, task.id);
-        
-        if (success) {
-          return client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: `🗑️ 任務已刪除：\n\n"${task.task_content}"`
-          });
-        }
-      }
-      
-      return client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: '❌ 找不到該任務編號，請使用「查看任務」確認編號'
-      });
-    }
-
-    // 新任務處理
-    const analyzedTask = await analyzeTask(message);
+    // 🎯 核心邏輯：獲取發言者資訊
+    const profile = await client.getProfile(userId);
+    const speakerName = profile.displayName;
+  
+    // 🎯 判斷是否為董事長或代理人發言
+    const speakerInfo = isChairmanOrDelegate(speakerName);
+  
+    if (speakerInfo.isRelevant) {
+      console.log(`🎤 偵測到${speakerInfo.role}發言: ${speakerName} - ${message.substring(0, 30)}...`);
     
-    if (analyzedTask === '非任務訊息') {
-      return client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: `👋 您好！我是任務管理助手\n\n🔧 可用指令：\n• 查看任務 - 查看所有任務\n• 完成 [編號] - 標記任務完成\n• 刪除 [編號] - 刪除任務\n• 統計 - 查看任務統計\n\n💡 直接傳送任務內容給我，我會自動幫您建立任務！`
-      });
-    }
-
-    // 添加新任務
-    const taskId = await addTask(userId, analyzedTask);
+      // 🤖 AI 分析發言內容
+      const analysisResult = await analyzeMessage(message, speakerInfo.type, speakerName);
     
-    return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: `✅ 新任務已建立！\n\n📝 任務內容：${analyzedTask}\n🆔 任務編號：${taskId}\n\n使用「查看任務」查看所有任務`
-    });
+      // 📝 記錄到資料庫
+      await recordMessage(groupId, speakerName, message, analysisResult, speakerInfo);
+    
+      // 🤐 保持靜默，不回應（除非是任務且需要確認）
+      // 可以選擇完全靜默，或是私訊通知管理者
+    }
+  
+    // 🤐 對於其他人的發言，完全忽略，保持靜默
+    return Promise.resolve(null);
 
   } catch (error) {
     console.error('處理訊息錯誤:', error);
-    return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: '抱歉，處理您的請求時發生錯誤，請稍後再試。'
-    });
+    // 即使發生錯誤也保持靜默，避免干擾群組對話
+    return Promise.resolve(null);
   }
 }
 
@@ -233,9 +377,23 @@ app.post('/webhook', (req, res) => {
 
 // 健康檢查
 app.get('/', (req, res) => {
-  res.send('Line Task Bot is running! 🤖');
+  res.json({
+    status: '葛董發言記錄系統運行中 🤖',
+    features: ['董事長發言記錄', '代理人任務識別', '靜默記錄'],
+    timestamp: new Date().toISOString(),
+    version: '1.0.0'
+  });
+});
+
+// 錯誤處理
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: 'Something went wrong!' });
 });
 
 app.listen(port, () => {
-  console.log(`🚀 Server is running on port ${port}`);
+  console.log(`🚀 葛董發言記錄系統運行在 port ${port}`);
+  console.log(`📱 準備接收 LINE 訊息並記錄董事長發言！`);
+  console.log(`👑 支援董事長和代理人發言識別`);
 });
+```
