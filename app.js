@@ -79,6 +79,20 @@ function isChairmanOrDelegate(displayName) {
   };
 }
 
+// 🎯 檢查是否包含葛董指示關鍵詞
+function containsChairmanKeywords(message) {
+  const chairmanKeywords = [
+    '葛董指示', '葛董交辦', '葛董交代', '葛董要求', '葛董希望', 
+    '葛董務必', '葛董說', '葛董的意見', '葛董認為',
+    '董事長指示', '董事長交辦', '董事長交代', '董事長要求', 
+    '董事長希望', '董事長務必', '董事長說', '董事長的意見',
+    '完成', '執行', '繳交', '處理', '安排', '準備',
+    '要求完成', '務必完成', '希望完成', '需要執行', '必須執行'
+  ];
+  
+  return chairmanKeywords.some(keyword => message.includes(keyword));
+}
+
 // 🤖 AI 分析發言是否包含任務交辦（支援董事長和代理人）
 async function analyzeMessage(message, speakerType, speakerName) {
   try {
@@ -89,6 +103,7 @@ async function analyzeMessage(message, speakerType, speakerName) {
 特別注意代理人常用的措辭：
 - "葛董說..."、"董事長指示..."、"葛董要求..."
 - "董事長交代..."、"葛董的意見是..."
+- 任何提及葛董的指示、交辦、交代、要求、希望、務必等詞彙
 - 即使沒有明確提及董事長，但涉及重要決策或指示的內容`;
 
     const response = await openai.chat.completions.create({
@@ -167,7 +182,7 @@ async function analyzeMessage(message, speakerType, speakerName) {
   }
 }
 
-// 📝 記錄董事長或代理人發言
+// 📝 記錄董事長、代理人或轉達者發言
 function recordMessage(groupId, speakerName, messageContent, analysisResult, speakerInfo) {
   return new Promise((resolve, reject) => {
     const { type, taskDescription, priority } = analysisResult;
@@ -182,7 +197,8 @@ function recordMessage(groupId, speakerName, messageContent, analysisResult, spe
           console.error('記錄儲存錯誤:', err);
           reject(err);
         } else {
-          console.log(`✅ 已記錄${speakerRole}${type === 'task' ? '任務交辦' : '發言'}:`, messageContent.substring(0, 50) + '...');
+          const actionType = type === 'task' ? '任務交辦' : '發言';
+          console.log(`✅ 已記錄${speakerRole}${actionType}:`, messageContent.substring(0, 50) + '...');
           resolve(this.lastID);
         }
       });
@@ -207,6 +223,8 @@ function getRecords(groupId, type = 'all', speakerFilter = 'all') {
       query += ' AND speaker_type = "chairman"';
     } else if (speakerFilter === 'delegate') {
       query += ' AND speaker_type = "delegate"';
+    } else if (speakerFilter === 'messenger') {
+      query += ' AND speaker_type = "messenger"';
     }
     
     query += ' ORDER BY created_at DESC';
@@ -239,7 +257,8 @@ function formatRecords(records) {
     });
     
     const typeIcon = record.record_type === 'task' ? '📌' : '💬';
-    const speakerIcon = record.speaker_type === 'chairman' ? '👑' : '👤';
+    const speakerIcon = record.speaker_type === 'chairman' ? '👑' : 
+                        record.speaker_type === 'delegate' ? '👤' : '📢';
     const priorityIcon = record.priority === 'high' ? '🔴' : 
                         record.priority === 'low' ? '🟢' : 
                         record.priority === 'normal' ? '🟡' : '';
@@ -261,10 +280,14 @@ function formatRecords(records) {
   const taskCount = records.filter(r => r.record_type === 'task').length;
   const chairmanCount = records.filter(r => r.speaker_type === 'chairman').length;
   const delegateCount = records.filter(r => r.speaker_type === 'delegate').length;
+  const messengerCount = records.filter(r => r.speaker_type === 'messenger').length;
   
   response += `📊 統計：\n`;
   response += `💬 一般發言 ${speechCount} 筆，📌 任務交辦 ${taskCount} 筆\n`;
   response += `👑 董事長 ${chairmanCount} 筆，👤 代理人 ${delegateCount} 筆`;
+  if (messengerCount > 0) {
+    response += `，📢 轉達者 ${messengerCount} 筆`;
+  }
   
   return response;
 }
@@ -331,6 +354,15 @@ async function handleEvent(event) {
         text: formatRecords(records)
       });
     }
+    
+    // 🔍 檢查是否為轉達者記錄查詢
+    if (message === '轉達記錄' || message === '其他人記錄') {
+      const records = await getRecords(groupId, 'all', 'messenger');
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: formatRecords(records)
+      });
+    }
 
     // 🎯 核心邏輯：獲取發言者資訊
     const profile = await client.getProfile(userId);
@@ -338,6 +370,9 @@ async function handleEvent(event) {
     
     // 🎯 判斷是否為董事長或代理人發言
     const speakerInfo = isChairmanOrDelegate(speakerName);
+    
+    // 🔍 檢查是否任何人提到葛董相關關鍵詞
+    const hasChairmanKeywords = containsChairmanKeywords(message);
     
     if (speakerInfo.isRelevant) {
       console.log(`🎤 偵測到${speakerInfo.role}發言: ${speakerName} - ${message.substring(0, 30)}...`);
@@ -347,9 +382,23 @@ async function handleEvent(event) {
       
       // 📝 記錄到資料庫
       await recordMessage(groupId, speakerName, message, analysisResult, speakerInfo);
+    } 
+    // 🎯 如果任何人提到葛董相關關鍵詞，也要記錄
+    else if (hasChairmanKeywords) {
+      console.log(`🔍 偵測到葛董相關指示: ${speakerName} - ${message.substring(0, 30)}...`);
       
-      // 🤐 保持靜默，不回應（除非是任務且需要確認）
-      // 可以選擇完全靜默，或是私訊通知管理者
+      // 將此人標記為「轉達者」
+      const delegateInfo = {
+        isRelevant: true,
+        type: 'messenger',
+        role: '轉達者'
+      };
+      
+      // 🤖 AI 分析內容（使用代理人模式）
+      const analysisResult = await analyzeMessage(message, 'delegate', speakerName);
+      
+      // 📝 記錄到資料庫
+      await recordMessage(groupId, speakerName, message, analysisResult, delegateInfo);
     }
     
     // 🤐 對於其他人的發言，完全忽略，保持靜默
