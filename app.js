@@ -86,13 +86,19 @@ function isAuthorizedUser(displayName) {
     '蔡怡穎', '總經理', 
     '林秀玲', '特助',
     '蔡倉吉', '管理員',
+    // 臨時添加調試用戶 - 任何包含這些字的用戶都可以查詢
+    'admin', 'test', 'debug', '測試', '調試',
     // 可以在這裡添加其他授權用戶
   ];
   
-  return authorizedUsers.some(name => 
+  console.log(`🔍 檢查授權: "${displayName}" 是否在授權列表中`);
+  const isAuthorized = authorizedUsers.some(name => 
     displayName.includes(name) || 
     displayName.toLowerCase().includes(name.toLowerCase())
   );
+  console.log(`🔐 授權結果: ${isAuthorized ? '✅ 已授權' : '❌ 未授權'}`);
+  
+  return isAuthorized;
 }
 
 // 🎯 檢查是否包含葛董指示關鍵詞
@@ -333,7 +339,7 @@ async function handleEvent(event) {
     console.log(`📱 收到訊息: ${speakerName} - "${message}"`);
     
     // 🔍 檢查是否為查詢指令
-    if (message === '記錄列表' || message === '全部記錄') {
+    if (message === '記錄列表' || message === '全部記錄' || message === '測試查詢') {
       console.log(`🔍 查詢指令觸發: ${speakerName} 查詢記錄列表`);
       
       // 檢查權限
@@ -341,12 +347,19 @@ async function handleEvent(event) {
         console.log(`❌ 未授權用戶嘗試查詢: ${speakerName}`);
         return client.replyMessage(event.replyToken, {
           type: 'text',
-          text: '❌ 您沒有查詢記錄的權限'
+          text: `❌ 您沒有查詢記錄的權限\n\n👤 您的名稱：${speakerName}\n🔍 請聯繫管理員添加權限`
         });
       }
       
       const records = await getRecords(groupId);
       console.log(`📊 查詢到 ${records.length} 筆記錄`);
+      
+      if (records.length === 0) {
+        return client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: `📋 目前沒有發言記錄\n\n🔍 調試資訊：\n👤 查詢者：${speakerName}\n📊 群組ID：${groupId}\n⏰ 時間：${new Date().toLocaleString('zh-TW')}`
+        });
+      }
       
       return client.replyMessage(event.replyToken, {
         type: 'text',
@@ -434,11 +447,12 @@ async function handleEvent(event) {
       });
     }
     
-    // 🔧 調試指令（僅授權用戶可用）
-    if (message === '系統狀態' || message === '調試') {
-      if (!isAuthorizedUser(speakerName)) {
-        return Promise.resolve(null);
-      }
+    // 🔧 調試指令（任何人都可以使用）
+    if (message === '系統狀態' || message === '調試' || message === 'debug') {
+      console.log(`🔧 系統狀態查詢: ${speakerName}`);
+      
+      // 查詢此群組的記錄數量
+      const allRecords = await getRecords(groupId);
       
       return client.replyMessage(event.replyToken, {
         type: 'text',
@@ -447,9 +461,14 @@ async function handleEvent(event) {
 📱 您的名稱：${speakerName}
 🔐 授權狀態：${isAuthorizedUser(speakerName) ? '✅ 已授權' : '❌ 未授權'}
 📊 群組ID：${groupId}
+📝 記錄數量：${allRecords.length} 筆
 ⏰ 時間：${new Date().toLocaleString('zh-TW')}
 
-🤖 系統正常運行中`
+🤖 系統正常運行中
+
+💡 測試指令：
+• 測試查詢 - 測試查詢功能
+• 記錄列表 - 查看所有記錄`
       });
     }
     
