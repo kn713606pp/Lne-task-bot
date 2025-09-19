@@ -79,6 +79,22 @@ function isChairmanOrDelegate(displayName) {
   };
 }
 
+// 🔐 檢查是否為授權查詢用戶
+function isAuthorizedUser(displayName) {
+  const authorizedUsers = [
+    '葛望平', '葛董', '董事長',
+    '蔡怡穎', '總經理', 
+    '林秀玲', '特助',
+    '蔡倉吉', '管理員',
+    // 可以在這裡添加其他授權用戶
+  ];
+  
+  return authorizedUsers.some(name => 
+    displayName.includes(name) || 
+    displayName.toLowerCase().includes(name.toLowerCase())
+  );
+}
+
 // 🎯 檢查是否包含葛董指示關鍵詞
 function containsChairmanKeywords(message) {
   const chairmanKeywords = [
@@ -310,9 +326,28 @@ async function handleEvent(event) {
   const groupId = event.source.groupId;
 
   try {
+    // 🎯 獲取發言者資訊
+    const profile = await client.getProfile(userId);
+    const speakerName = profile.displayName;
+    
+    console.log(`📱 收到訊息: ${speakerName} - "${message}"`);
+    
     // 🔍 檢查是否為查詢指令
     if (message === '記錄列表' || message === '全部記錄') {
+      console.log(`🔍 查詢指令觸發: ${speakerName} 查詢記錄列表`);
+      
+      // 檢查權限
+      if (!isAuthorizedUser(speakerName)) {
+        console.log(`❌ 未授權用戶嘗試查詢: ${speakerName}`);
+        return client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: '❌ 您沒有查詢記錄的權限'
+        });
+      }
+      
       const records = await getRecords(groupId);
+      console.log(`📊 查詢到 ${records.length} 筆記錄`);
+      
       return client.replyMessage(event.replyToken, {
         type: 'text',
         text: formatRecords(records)
@@ -321,6 +356,13 @@ async function handleEvent(event) {
     
     // 🔍 檢查是否為任務記錄查詢
     if (message === '任務記錄' || message === '任務列表') {
+      if (!isAuthorizedUser(speakerName)) {
+        return client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: '❌ 您沒有查詢記錄的權限'
+        });
+      }
+      
       const records = await getRecords(groupId, 'task');
       return client.replyMessage(event.replyToken, {
         type: 'text',
@@ -330,6 +372,13 @@ async function handleEvent(event) {
     
     // 🔍 檢查是否為發言記錄查詢
     if (message === '發言記錄') {
+      if (!isAuthorizedUser(speakerName)) {
+        return client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: '❌ 您沒有查詢記錄的權限'
+        });
+      }
+      
       const records = await getRecords(groupId, 'speech');
       return client.replyMessage(event.replyToken, {
         type: 'text',
@@ -339,6 +388,13 @@ async function handleEvent(event) {
     
     // 🔍 檢查是否為董事長記錄查詢
     if (message === '葛董記錄' || message === '董事長記錄') {
+      if (!isAuthorizedUser(speakerName)) {
+        return client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: '❌ 您沒有查詢記錄的權限'
+        });
+      }
+      
       const records = await getRecords(groupId, 'all', 'chairman');
       return client.replyMessage(event.replyToken, {
         type: 'text',
@@ -348,6 +404,13 @@ async function handleEvent(event) {
     
     // 🔍 檢查是否為代理人記錄查詢
     if (message === '代理人記錄' || message === '總經理記錄' || message === '特助記錄') {
+      if (!isAuthorizedUser(speakerName)) {
+        return client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: '❌ 您沒有查詢記錄的權限'
+        });
+      }
+      
       const records = await getRecords(groupId, 'all', 'delegate');
       return client.replyMessage(event.replyToken, {
         type: 'text',
@@ -357,16 +420,38 @@ async function handleEvent(event) {
     
     // 🔍 檢查是否為轉達者記錄查詢
     if (message === '轉達記錄' || message === '其他人記錄') {
+      if (!isAuthorizedUser(speakerName)) {
+        return client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: '❌ 您沒有查詢記錄的權限'
+        });
+      }
+      
       const records = await getRecords(groupId, 'all', 'messenger');
       return client.replyMessage(event.replyToken, {
         type: 'text',
         text: formatRecords(records)
       });
     }
+    
+    // 🔧 調試指令（僅授權用戶可用）
+    if (message === '系統狀態' || message === '調試') {
+      if (!isAuthorizedUser(speakerName)) {
+        return Promise.resolve(null);
+      }
+      
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: `🔧 系統調試資訊：
+        
+📱 您的名稱：${speakerName}
+🔐 授權狀態：${isAuthorizedUser(speakerName) ? '✅ 已授權' : '❌ 未授權'}
+📊 群組ID：${groupId}
+⏰ 時間：${new Date().toLocaleString('zh-TW')}
 
-    // 🎯 核心邏輯：獲取發言者資訊
-    const profile = await client.getProfile(userId);
-    const speakerName = profile.displayName;
+🤖 系統正常運行中`
+      });
+    }
     
     // 🎯 判斷是否為董事長或代理人發言
     const speakerInfo = isChairmanOrDelegate(speakerName);
